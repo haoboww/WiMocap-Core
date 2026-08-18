@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.vscode/
+third_party/
+processed_calterah/
+processed_ti/
+processed_bgt60/
+validation_outputs/
+*.log

@@ -1,0 +1,184 @@
+# EasyMocap config for WiMocap pipeline
+# Simplified version with minimal outputs
+
+module: myeasymocap.stages.basestage.MultiStage
+args:
+  output: output/smpl_result  # Will be overridden by --out argument
+  at_step:
+    # Step 1: Person detection (YOLO)
+    detect:
+      module: myeasymocap.backbone.yolo.yolo.BaseYOLOv5
+      key_from_data: [images, imgnames]
+      args:
+        model: yolov5m
+        ckpt: models/yolov5m.pt
+        name: person
+    
+    # Step 2: 2D keypoints detection (HRNet)
+    keypoints2d:
+      module: myeasymocap.backbone.hrnet.myhrnet.MyHRNet
+      key_from_data: [images, imgnames]
+      key_from_previous: [bbox]
+      key_keep: []
+      args:
+        ckpt: data/models/pose_hrnet_w48_384x288.pth
+    
+    # Step 3: Visualize 2D keypoints
+    vis2d:
+      module: myeasymocap.io.vis.Vis2D
+      skip: False
+      key_from_data: [images]
+      key_from_previous: [keypoints, bbox]
+      args:
+        name: vis_keypoints2d
+        scale: 0.5
+    
+    # Step 4: Triangulate to 3D
+    triangulate:
+      module: myeasymocap.operations.triangulate.SimpleTriangulate
+      key_from_data: [cameras]
+      key_from_previous: [keypoints]
+      key_keep: [cameras, imgnames]
+      args:
+        mode: iterative
+    
+    # Step 5: Visualize 3D reprojection
+    visualize:
+      module: myeasymocap.io.vis.Vis3D
+      skip: False
+      key_from_data: [images, cameras]
+      key_from_previous: [keypoints3d]
+      args:
+        scale: 0.5
+        mode: center
+
+  at_final:
+    # Load SMPL model
+    load_body_model:
+      module: myeasymocap.io.model.SMPLLoader
+      args:
+        model_path: models/pare/data/body_models/smpl/SMPL_NEUTRAL.pkl
+        regressor_path: models/J_regressor_body25.npy
+    
+    # Initialize parameters
+    init_params:
+      module: myeasymocap.operations.init.InitParams
+      key_from_data: [keypoints3d]
+      args:
+        num_poses: 69
+        num_shapes: 10
+    
+    # Fit body shape
+    fitShape:
+      module: myeasymocap.operations.optimizer.Optimizer
+      key_from_data: [keypoints3d]
+      key_from_previous: [model, params]
+      args:
+        optimizer_args: {optim_type: lbfgs}
+        optimize_keys: [shapes]
+        loss:
+          k3d:
+            weight: 100.
+            module: myeasymocap.operations.loss.LimbLength
+            key_from_output: [keypoints]
+            key_from_infos: [keypoints3d]
+            args:
+              kintree: [[8, 1], [2, 5], [2, 3], [5, 6], [3, 4], [6, 7], [2, 3], [5, 6], [3, 4], [6, 7], [2, 3], [5, 6], [3, 4], [6, 7], [1, 0], [9, 12], [9, 10], [10, 11], [12, 13],[13, 14]]
+          regshape:
+            weight: 0.1
+            module: myeasymocap.operations.loss.RegLoss
+            key_from_output: [shapes]
+            key_from_infos: []
+            args:
+              key: shapes
+              norm: l2
+    
+    # Initialize rotation and translation
+    init_RT:
+      module: myeasymocap.operations.optimizer.Optimizer
+      key_from_data: [keypoints, keypoints3d]
+      key_from_previous: [model, params]
+      args:
+        optimizer_args: {optim_type: lbfgs}
+        optimize_keys: [Th, Rh]
+        loss:
+          k3d:
+            weight: 100.
+            module: myeasymocap.operations.loss.Keypoints3D
+            key_from_output: [keypoints]
+            key_from_infos: [keypoints3d]
+            args:
+              norm: l2
+              index_est: [2, 5, 9, 12]
+              index_gt: [2, 5, 9, 12]
+          smooth:
+            weight: 1.
+            module: myeasymocap.operations.loss.Smooth
+            key_from_output: [Th, keypoints]
+            key_from_infos: []
+            args:
+              keys: [keypoints, Th]
+              smooth_type: [Linear, Linear]
+              norm: [l2, l2]
+              order: [2, 2]
+              weights: [10., 100.]
+              window_weight: [0.5, 0.3, 0.1, 0.1]
+    
+    # Refine poses
+    refine_poses:
+      repeat: 2
+      module: myeasymocap.operations.optimizer.Optimizer
+      key_from_data: [keypoints, keypoints3d]
+      key_from_previous: [model, params]
+      args:
+        optimizer_args: {optim_type: lbfgs}
+        optimize_keys: [poses, Rh, Th]
+        loss:
+          k3d:
+            weight: 1000.
+            module: myeasymocap.operations.loss.Keypoints3D
+            key_from_output: [keypoints]
+            key_from_infos: [keypoints3d]
+            args:
+              norm: l2
+              norm_info: 0.02
+          smooth:
+            weight: 1.
+            module: myeasymocap.operations.loss.Smooth
+            key_from_output: [poses, Th, keypoints]
+            key_from_infos: []
+            args:
+              keys: [Th, poses, keypoints]
+              smooth_type: [Linear, Linear, Linear]
+              norm: [l2, l2, l2]
+              order: [2, 2, 2]
+              weights: [100., 10., 10.,]
+              window_weight: [0.5, 0.3, 0.1, 0.1]
+          prior:
+            weight: 0.1
+            module: easymocap.multistage.gmm.GMMPrior
+            key_from_output: [poses]
+            key_from_infos: []
+            args:
+              start: 0
+              end: 69
+    
+    # Write SMPL results (main output)
+    write:
+      module: myeasymocap.io.write.WriteSMPL
+      key_from_data: [meta]
+      key_from_previous: [params, model]
+      args:
+        name: smpl
+    
+    # Render SMPL overlay on all camera views
+    render_overlay:
+      module: myeasymocap.io.vis3d.Render_multiview
+      skip: True
+      key_from_data: [cameras, imgnames]
+      key_from_previous: [params, body_model]
+      args:
+        backend: pyrender
+        view_list: []  # Empty = all views
+        mode: image    # Overlay on original images
+        scale: 0.5
