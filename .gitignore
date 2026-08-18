@@ -3,7 +3,6 @@ __pycache__/
 .pytest_cache/
 .idea/
 .vscode/
-third_party/
 processed_calterah/
 processed_ti/
 processed_bgt60/
