@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import importlib
 import json
 import sys
@@ -41,7 +42,23 @@ MODULES = (
     ("tabulate", "tabulate"),
     ("termcolor", "termcolor"),
     ("ultralytics", "ultralytics"),
+    ("seaborn", "seaborn"),
+    ("GitPython", "git"),
+    ("gdown", "gdown"),
 )
+
+EXPECTED_SHA256 = {
+    "third_party/EasyMocapFork/data/models/pose_hrnet_w48_384x288.pth":
+        "95e0fec3194826d5e3f806ea89be68bbb84517b114c3a32b3058c56610b5ef61",
+}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def check_session(session: Path) -> list[str]:
@@ -145,10 +162,49 @@ def main() -> int:
     except Exception:
         pass
 
+    try:
+        import numpy as np
+        import torch
+        from easymocap.multistage.gmm import create_prior_from_cmu, GMMPrior
+
+        prior_data = create_prior_from_cmu(8)
+        expected_shape = (1, 8)
+        if prior_data["nll_weights"].shape != expected_shape:
+            raise ValueError(
+                "GMM nll_weights has shape "
+                f"{prior_data['nll_weights'].shape}, expected {expected_shape}"
+            )
+        for key in ("precisions", "nll_weights", "cov_dets"):
+            if not np.isfinite(prior_data[key]).all():
+                raise ValueError(f"GMM {key} contains NaN or infinity")
+        poses = torch.zeros((2, 69), dtype=torch.float32, requires_grad=True)
+        prior_loss = GMMPrior(start=0, end=69)(
+            {"poses": poses}, {}
+        )
+        prior_loss.backward()
+        if not torch.isfinite(prior_loss) or not torch.isfinite(poses.grad).all():
+            raise ValueError("GMM loss or gradient is not finite")
+        print(
+            "[ok] GMM pose prior: "
+            f"shape={expected_shape}, loss={prior_loss.item():.4f}, finite gradient"
+        )
+    except Exception as exc:
+        errors.append(f"invalid GMM pose prior: {exc}")
+
     for relative in REQUIRED_FILES:
         path = PROJECT_ROOT / relative
         if path.is_file():
             print(f"[ok] {relative} ({path.stat().st_size / 1048576:.1f} MiB)")
+            expected_hash = EXPECTED_SHA256.get(relative)
+            if expected_hash is not None:
+                actual_hash = sha256_file(path)
+                if actual_hash != expected_hash:
+                    errors.append(
+                        f"checksum mismatch for {relative}: "
+                        f"expected {expected_hash}, got {actual_hash}"
+                    )
+                else:
+                    print(f"[ok] {relative} sha256={actual_hash}")
         else:
             errors.append(f"missing required file: {relative}")
 

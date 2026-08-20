@@ -3,8 +3,13 @@ __pycache__/
 .pytest_cache/
 .idea/
 .vscode/
+*.egg-info/
 processed_calterah/
 processed_ti/
 processed_bgt60/
 validation_outputs/
 *.log
+
+# HRNet is 243 MiB and exceeds GitHub's regular Git file limit. Keep the
+# checkpoint in external model storage and link/copy it into this path.
+third_party/EasyMocapFork/data/models/pose_hrnet_w48_384x288.pth

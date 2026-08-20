@@ -43,13 +43,14 @@ debug0801/
 以下版本已经在当前机器验证：Python 3.9、PyTorch 2.8.0、CUDA 12.8、torchvision 0.23.0。
 
 ```bash
-cd /home/wais/Github/WiMocap-Core
+git clone git@github.com:haoboww/WiMocap-Core.git
+cd WiMocap-Core
 
-conda create -n wimocap-post python=3.9 -y
-conda activate wimocap-post
+conda create -n mocap python=3.9 -y
+conda activate mocap
 
 sudo apt-get update
-sudo apt-get install -y libgl1 libglib2.0-0 libosmesa6
+sudo apt-get install -y libgl1 libegl1 libglib2.0-0
 
 python -m pip install --upgrade pip
 python -m pip install torch==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128
@@ -61,6 +62,32 @@ python scripts/check_environment.py
 
 如果新机器驱动不支持 CUDA 12.8，只替换 PyTorch/torchvision 安装命令；其余依赖保持不变。处理前必须确认 `python scripts/check_environment.py` 显示 `CUDA available: True`。
 
+YOLOv5 和 SMPL 权重包含在 Git 仓库中。HRNet 权重约 243 MiB，超过 GitHub 普通 Git 的单文件限制，需要单独放置：
+
+```text
+third_party/EasyMocapFork/data/models/pose_hrnet_w48_384x288.pth
+```
+
+可以从已配置好的机器复制，或者用仓库依赖的 `gdown` 下载到外部模型目录后建立软链接：
+
+```bash
+mkdir -p /path/to/shared/models/wimocap
+gdown 'https://drive.google.com/uc?id=11ezQ6a_MxIRtj26WqhH3V3-xPI3XqYAw' \
+  -O /path/to/shared/models/wimocap/pose_hrnet_w48_384x288.pth
+
+mkdir -p third_party/EasyMocapFork/data/models
+ln -s /path/to/shared/models/wimocap/pose_hrnet_w48_384x288.pth \
+  third_party/EasyMocapFork/data/models/pose_hrnet_w48_384x288.pth
+
+sha256sum third_party/EasyMocapFork/data/models/pose_hrnet_w48_384x288.pth
+```
+
+正确的 SHA256 是：
+
+```text
+95e0fec3194826d5e3f806ea89be68bbb84517b114c3a32b3058c56610b5ef61
+```
+
 可以同时检查一组原始数据：
 
 ```bash
@@ -68,15 +95,15 @@ python scripts/check_environment.py \
   --session /media/wais/SANDISK1/debug0801/capture_20260803_115639
 ```
 
-YOLOv5 源码、YOLO、HRNet 和 SMPL 权重都已包含在本目录中，正常运行不需要下载模型。
+`check_environment.py` 会检查模型大小、HRNet SHA256、GMM 姿态先验的数值和梯度，任一项失败都不要开始批处理。
 
 ## 处理单个 Session
 
 先进入仓库并激活环境：
 
 ```bash
-cd /home/wais/Github/WiMocap-Core
-conda activate wimocap-post
+cd /path/to/WiMocap-Core
+conda activate mocap
 ```
 
 Calterah：
@@ -141,6 +168,26 @@ python data_pipeline/process_radar_session.py \
 ```
 
 然后依次将 `--radar` 和输出目录改为 `ti`、`bgt60`，各执行一次。
+
+8 卡服务器建议使用可恢复的任务调度器。每张 GPU 同时只运行一个 session/radar，单任务失败不会中断剩余队列：
+
+```bash
+python scripts/run_batch_8gpu.py \
+  --data-roots \
+    /mnt/SANDISK/debug0731 \
+    /mnt/SANDISK/debug0801 \
+    /mnt/SANDISK/debug0803 \
+    /mnt/SANDISK_backup/debug0804 \
+  --output-base /data/wimocap_processed \
+  --run-dir /data/wimocap_processed/_batch_runs/run_01 \
+  --gpus 0 1 2 3 4 5 6 7 \
+  --radars bgt60 ti calterah \
+  --threads 4 \
+  --python "$CONDA_PREFIX/bin/python" \
+  --exclude capture_20260803_115639 capture_20260803_120503
+```
+
+任务清单、实时状态和失败记录分别保存在 `run-dir` 的 `manifest.json`、`summary.json` 和 `events.jsonl`。重复执行时底层 pipeline 会跳过已经完整的步骤；不要让两台机器同时写同一个输出目录。
 
 ## 输出结构
 
@@ -208,7 +255,7 @@ EasyMocap 的当前 SMPL 配置包含二阶时序平滑。手动使用 `run_easy
 搬到新机器后先执行：
 
 ```bash
-cd /home/wais/Github/WiMocap-Core
+cd /path/to/WiMocap-Core
 du -sh .
 sha256sum -c MANIFEST.sha256
 python scripts/check_environment.py --session /path/to/one/capture_session

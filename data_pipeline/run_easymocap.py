@@ -293,7 +293,10 @@ def run_emc(data_root, cameras, exp_config='config/mv1p/detect_triangulate_fitSM
     # Suppress warnings and enable headless rendering
     env = os.environ.copy()
     env['PYTHONWARNINGS'] = 'ignore::FutureWarning,ignore::RuntimeWarning'
-    env['PYOPENGL_PLATFORM'] = 'osmesa'  # Enable headless rendering
+    # NVIDIA servers provide headless OpenGL through EGL.  Forcing OSMesa here
+    # makes even skipped visualization stages fail while importing pyrender on
+    # machines without libOSMesa.
+    env['PYOPENGL_PLATFORM'] = 'egl'
     
     # Run from EasyMocap directory
     result = subprocess.run(cmd, cwd=EASYMOCAP_ROOT, env=env)

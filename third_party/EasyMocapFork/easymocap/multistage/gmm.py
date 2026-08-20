@@ -2,6 +2,7 @@ import pickle
 import os
 from os.path import join
 import numpy as np
+from scipy import linalg as scipy_linalg
 import torch
 from .lossbase import LossBase
 
@@ -13,23 +14,43 @@ def create_prior_from_cmu(n_gaussians, epsilon=1e-15):
         gmm = pickle.load(f, encoding='latin1')
     if True:
         means = gmm['means'].astype(np_dtype)
-        covs = gmm['covars'].astype(np_dtype)
+        # Inverting these covariance matrices after casting to float32 is
+        # numerically unstable with current NumPy/OpenBLAS and can produce
+        # values around 1e10 for matrices whose condition numbers are only
+        # around 1e3.  Invert the symmetrized matrices in float64, then cast
+        # the result used by PyTorch.
+        covs64 = gmm['covars'].astype(np.float64)
+        covs64 = 0.5 * (covs64 + covs64.swapaxes(-1, -2))
+        covs = covs64.astype(np_dtype)
         weights = gmm['weights'].astype(np_dtype)
-    precisions = [np.linalg.inv(cov) for cov in covs]
-    precisions = np.stack(precisions).astype(np_dtype)
+    precisions = np.stack([
+        scipy_linalg.inv(cov, check_finite=False) for cov in covs64
+    ]).astype(np_dtype)
 
-    sqrdets = np.array([(np.sqrt(np.linalg.det(c)))
-                        for c in gmm['covars']])
-    const = (2 * np.pi)**(69 / 2.)
-
-    nll_weights = np.asarray(gmm['weights'] / (const * (sqrdets / sqrdets.min())))
-    cov_dets = [np.log(np.linalg.det(cov.astype(np_dtype)) + epsilon)
-                    for cov in covs]
+    # These 69-D covariance matrices are close to singular.  Computing their
+    # determinants directly can underflow to a small negative value, making
+    # sqrt(det) and the entire pose prior NaN. Keep the same likelihood
+    # calculation in the log domain and sum the log eigenvalues for numerical
+    # stability.
+    logabsdets = np.stack([
+        np.log(scipy_linalg.eigvalsh(cov, check_finite=False)).sum()
+        for cov in covs64
+    ])
+    log_sqrdets = 0.5 * logabsdets
+    log_const = (69 / 2.) * np.log(2 * np.pi)
+    nll_weights = (
+        -np.log(gmm['weights'])
+        + log_const
+        + (log_sqrdets - log_sqrdets.min())
+    ).astype(np_dtype)
+    cov_dets = logabsdets.astype(np_dtype)
     return {
         'means': means,
         'covs': covs,
         'precisions': precisions,
-        'nll_weights': -np.log(nll_weights[None]),
+        # Shape must remain (1, num_gaussians) so it broadcasts against
+        # (num_frames, num_gaussians) before minimizing over mixtures.
+        'nll_weights': nll_weights[None],
         'weights': weights,
         'pi_term': np.log(2*np.pi),
         'cov_dets': cov_dets
